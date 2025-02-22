@@ -4,10 +4,11 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
+import shutil
 
 import jinja2
 import requests
-
+import requests_cache
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ SET_TYPES = (
     "premium_deck",  # Premium Deck Series: Slivers, Premium Deck Series: Graveborn
     "from_the_vault",  # Make sure to adjust the MINIMUM_SET_SIZE if you want these
     "archenemy",
+    "masterpiece", # Breaking News
     "box",
     "funny",  # Unglued, Unhinged, Ponies: TG, etc.
     # "memorabilia",  # Commander's Arsenal, Celebration Cards, World Champ Decks
@@ -49,7 +51,7 @@ SET_TYPES = (
 
 # Only include sets at least this size
 # For reference, the smallest proper expansion is Arabian Nights with 78 cards
-MINIMUM_SET_SIZE = 50
+MINIMUM_SET_SIZE = 0
 
 # Set codes you might want to ignore
 IGNORED_SETS = (
@@ -131,14 +133,17 @@ class LabelGenerator:
 
     DEFAULT_OUTPUT_DIR = Path(os.getcwd()) / "output"
 
-    COLS = 4
-    ROWS = 15
-    MARGIN = 200  # in 1/10 mm
-    START_X = MARGIN
-    START_Y = MARGIN
+    COLS = 7
+    ROWS = 22
+    #MARGIN = 89  # in 1/10 mm
+    MARGINX = 102
+    MARGINY = 74
+    START_X = MARGINX
+    START_Y = MARGINY
 
     PAPER_SIZES = {
-        "letter": {"width": 2790, "height": 2160, },  # in 1/10 mm
+        "letter": {"width": 2160, "height": 2790, },
+        "letterLandscape": {"width": 2790, "height": 2160, },  # in 1/10 mm
         "a4": {"width": 2970, "height": 2100, },
     }
     DEFAULT_PAPER_SIZE = "letter"
@@ -156,8 +161,11 @@ class LabelGenerator:
         self.height = paper["height"]
 
         # These are the deltas between rows and columns
-        self.delta_x = (self.width - (2 * self.MARGIN)) / self.COLS
-        self.delta_y = (self.height - (2 * self.MARGIN)) / self.ROWS
+        self.delta_x = (self.width - (2 * self.MARGINX)) / self.COLS
+        self.delta_y = (self.height - (2 * self.MARGINY)) / self.ROWS
+
+        print("Width: ", self.delta_x)
+        print("Height: ", self.delta_y)
 
         self.output_dir = Path(output_dir)
 
@@ -170,6 +178,10 @@ class LabelGenerator:
 
         page = 1
         labels = self.create_set_label_data()
+
+        shutil.rmtree(self.output_dir)
+        os.makedirs(self.output_dir)
+
         while labels:
             exps = []
             while labels and len(exps) < (self.ROWS * self.COLS):
@@ -198,6 +210,8 @@ class LabelGenerator:
                 cairosvg.svg2pdf(
                     file_obj=fd, write_to=outfile_pdf,
                 )
+
+            os.remove(outfile_svg)
 
             page += 1
 
@@ -234,6 +248,61 @@ class LabelGenerator:
 
         set_data.reverse()
         return set_data
+    
+    def group_set_data(self, set_data):
+        parents = []
+        children = []
+
+        for exp in set_data:
+            if "parent_set_code" in exp:
+                children.append(exp)
+            else: 
+                parents.append(exp)
+                
+        for parent in parents: 
+            parent["count"] = 1
+            for child in children:
+                if parent["code"] == child["parent_set_code"] and parent["icon_svg_uri"] != child["icon_svg_uri"]:
+                    parent["count"] += 1
+                    parent["icon_svg_uri_"+str(parent["count"])] = child["icon_svg_uri"]
+                    parent["set_type_"+str(parent["count"])] = child["set_type"]
+        
+        for parent in parents:
+            size = parent["count"] 
+            #print(parent["name"],parent["code"],size)
+            if parent["count"] == 4:
+                parentCopy = parent.copy()
+                parent["count"] = 2
+                parentCopy["count"] = 2
+                if(parent["set_type_3"] == "commander"):
+                    parent["icon_svg_uri_2"] = parentCopy["icon_svg_uri_3"]
+                    parent["set_type_2"] = parentCopy["set_type_3"]
+                    parentCopy["icon_svg_uri"] = parentCopy["icon_svg_uri_2"]
+                    parentCopy["set_type"] = parentCopy["set_type_2"]
+                    parentCopy["icon_svg_uri_2"] = parentCopy["icon_svg_uri_4"]
+                    parentCopy["set_type_2"] = parentCopy["set_type_4"]
+                elif(parent["set_type_4"] == "commander"):
+                    parent["icon_svg_uri_2"] = parentCopy["icon_svg_uri_4"]
+                    parent["set_type_2"] = parentCopy["set_type_4"]
+                    parentCopy["icon_svg_uri"] = parentCopy["icon_svg_uri_2"]
+                    parentCopy["set_type"] = parentCopy["set_type_2"]
+                    parentCopy["icon_svg_uri_2"] = parentCopy["icon_svg_uri_3"]
+                    parentCopy["set_type_2"] = parentCopy["set_type_3"]
+
+            
+                parents.append(parentCopy)
+
+        parents = sorted(parents, key=lambda x: x["released_at"], reverse=False)
+        
+        return parents
+
+    def double_set_data(self, set_data):
+        new_set_data = []
+        for set in set_data:
+            new_set_data.append(set)
+            new_set_data.append(set)
+        return new_set_data
+            
 
     def create_set_label_data(self):
         """
@@ -245,23 +314,94 @@ class LabelGenerator:
         x = self.START_X
         y = self.START_Y
 
+
+        requests_cache.install_cache('set_cache')
+
+
         # Get set data from scryfall
         set_data = self.get_set_data()
 
-        for exp in set_data:
+        parent_data = self.group_set_data(set_data)
+
+        # Double set data
+        parent_data = self.double_set_data(parent_data)
+
+        sets_to_grab = ["scd","acr","blb"]
+
+        buffer = 86
+
+        while buffer > 0:
+            labels.append(
+                {
+                    "name": "",
+                    "date": "",
+                    "count": 0,
+                    "icon_url": "",
+                    "icon_b64": "",
+                    "icon_b64_1": "",
+                    "icon_b64_2": "",
+                    "icon_b64_3": "",
+                    "x": x,
+                    "y": y,
+                }
+            )
+            y += self.delta_y
+            # Start a new column if needed
+            if len(labels) % self.ROWS == 0:
+                x += self.delta_x
+                y = self.START_Y
+            # Start a new page if needed
+            if len(labels) % (self.ROWS * self.COLS) == 0:
+                x = self.START_X
+                y = self.START_Y
+            buffer -= 1
+
+        count = 0
+
+        for exp in parent_data:
+            if 'sets_to_grab' in locals() and exp["code"].lower() not in sets_to_grab:
+                continue
+
+            count += 1
             name = RENAME_SETS.get(exp["name"], exp["name"])
             icon_resp = requests.get(exp["icon_svg_uri"])
+            
             icon_b64 = None
-            if icon_resp.ok:
-                icon_b64 = base64.b64encode(icon_resp.content).decode('utf-8')
+            icon_b64_1 = None
+            icon_b64_2 = None
+            icon_b64_3 = None
+            if(exp["count"]>=1):
+                icon_resp = requests.get(exp["icon_svg_uri"])
+                if icon_resp.ok:
+                    icon_b64 = base64.b64encode(icon_resp.content).decode('utf-8')
+            
+            if(exp["count"]>=2):
+                icon_resp_1 = requests.get(exp["icon_svg_uri_2"])
+                if icon_resp_1.ok:
+                    icon_b64_1 = base64.b64encode(icon_resp_1.content).decode('utf-8')
+            
+            if(exp["count"]>=3):
+                icon_resp_2 = requests.get(exp["icon_svg_uri_3"])
+                if icon_resp_2.ok:
+                    icon_b64_2 = base64.b64encode(icon_resp_2.content).decode('utf-8')
+
+            if(exp["count"]>=4):
+                icon_resp_3 = requests.get(exp["icon_svg_uri_4"])
+                if icon_resp_3.ok:
+                    icon_b64_3 = base64.b64encode(icon_resp_3.content).decode('utf-8')
+
 
             labels.append(
                 {
                     "name": name,
                     "code": exp["code"],
                     "date": datetime.strptime(exp["released_at"], "%Y-%m-%d").date(),
+                    "count": exp["count"],
                     "icon_url": exp["icon_svg_uri"],
                     "icon_b64": icon_b64,
+                    "icon_b64_1": icon_b64_1,
+                    "icon_b64_2": icon_b64_2,
+                    "icon_b64_3": icon_b64_3,
                     "x": x,
                     "y": y,
                 }
@@ -279,6 +419,49 @@ class LabelGenerator:
                 x = self.START_X
                 y = self.START_Y
 
+        print("Count: ", count/2)
+        print("Expected: ", len(sets_to_grab))
+
+        # extraSymbolUrl = "https://svgs.scryfall.io/card-symbols/C.svg"
+        # icon = requests.get(extraSymbolUrl)
+        # b64Icon = base64.b64encode(icon.content).decode('utf-8')
+        
+        # labels.append(
+        #         {
+        #             "name": "Extra",
+        #             "code": "",
+        #             "date": "",
+        #             "count": 1,
+        #             "icon_url": extraSymbolUrl,
+        #             "icon_b64": b64Icon,
+        #             "x": x,
+        #             "y": y,
+        #         })
+        
+        # y += self.delta_y
+
+        # # Start a new column if needed
+        # if len(labels) % self.ROWS == 0:
+        #     x += self.delta_x
+        #     y = self.START_Y
+
+        # # Start a new page if needed
+        # if len(labels) % (self.ROWS * self.COLS) == 0:
+        #     x = self.START_X
+        #     y = self.START_Y
+        
+        # labels.append(
+        #         {
+        #             "name": "Extra",
+        #             "code": "",
+        #             "date": "",
+        #             "count": 1,
+        #             "icon_url": extraSymbolUrl,
+        #             "icon_b64": b64Icon,
+        #             "x": x,
+        #             "y": y,
+        #         })
+
         return labels
 
     def create_horizontal_cutting_guides(self):
@@ -287,18 +470,18 @@ class LabelGenerator:
         for i in range(self.ROWS + 1):
             horizontal_guides.append(
                 {
-                    "x1": self.MARGIN / 2,
-                    "x2": self.MARGIN * 0.8,
-                    "y1": self.MARGIN + i * self.delta_y,
-                    "y2": self.MARGIN + i * self.delta_y,
+                    "x1": self.MARGINX / 2,
+                    "x2": self.MARGINX * 0.8,#20,
+                    "y1": self.MARGINY + i * self.delta_y,
+                    "y2": self.MARGINY + i * self.delta_y,
                 }
             )
             horizontal_guides.append(
                 {
-                    "x1": self.width - self.MARGIN / 2,
-                    "x2": self.width - self.MARGIN * 0.8,
-                    "y1": self.MARGIN + i * self.delta_y,
-                    "y2": self.MARGIN + i * self.delta_y,
+                    "x1": self.width - self.MARGINX / 2,
+                    "x2": self.width - self.MARGINX * 0.8,#20,
+                    "y1": self.MARGINY + i * self.delta_y,
+                    "y2": self.MARGINY + i * self.delta_y,
                 }
             )
 
@@ -310,18 +493,18 @@ class LabelGenerator:
         for i in range(self.COLS + 1):
             vertical_guides.append(
                 {
-                    "x1": self.MARGIN + i * self.delta_x,
-                    "x2": self.MARGIN + i * self.delta_x,
-                    "y1": self.MARGIN / 2,
-                    "y2": self.MARGIN * 0.8,
+                    "x1": self.MARGINX + i * self.delta_x,
+                    "x2": self.MARGINX + i * self.delta_x,
+                    "y1": self.MARGINY / 2,
+                    "y2": self.MARGINY * 0.8,#20,
                 }
             )
             vertical_guides.append(
                 {
-                    "x1": self.MARGIN + i * self.delta_x,
-                    "x2": self.MARGIN + i * self.delta_x,
-                    "y1": self.height - self.MARGIN / 2,
-                    "y2": self.height - self.MARGIN * 0.8,
+                    "x1": self.MARGINX + i * self.delta_x,
+                    "x2": self.MARGINX + i * self.delta_x,
+                    "y1": self.height - self.MARGINY / 2,
+                    "y2": self.height - self.MARGINY * 0.8,#20,
                 }
             )
 
